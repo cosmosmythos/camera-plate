@@ -1,0 +1,11 @@
+schema_version = "1.0.0"
+id = "camera_plate"
+name = "Camera Plate"
+version = "0.1.0"
+tagline = "Draw a rectangle in the viewport. Get a camera that matches its frame."
+maintainer = "cosmosmythos"
+type = "add-on"
+tags = ["Camera", "Texturing", "Pipeline"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 cosmosmythos"]
