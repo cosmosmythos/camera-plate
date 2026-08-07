@@ -289,7 +289,7 @@ class CameraPlateDialogOperator(bpy.types.Operator):
     )
     image_float: bpy.props.BoolProperty(
         name="32 bit",
-        description="32-bit float color",
+        description="32 bit float",
         default=True,
     )
 
@@ -316,9 +316,10 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         if plate_camera is None:
             self.report({"ERROR"}, "Draw camera frame first.")
             return {"CANCELLED"}
-        self._create_camera(context, plate_camera)
+        camera_object = self._create_camera(context, plate_camera)
         if self.create_image:
-            self._create_image(context)
+            image = self._create_image(context)
+            camera_object["CP_image"] = image
         return {"FINISHED"}
 
     def _create_image(self, context):
@@ -333,12 +334,13 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         image.generated_type = "BLANK"
         image.generated_color = (0.0, 0.0, 0.0, fill_alpha)
         image.update()
+        return image
 
     def cancel(self, context):
         global _pending_plate_camera
         _pending_plate_camera = None
 
-    def _create_camera(self, context, plate_camera: PlateCamera):
+    def _create_camera(self, context, plate_camera: PlateCamera) -> bpy.types.Object:
         camera_data = bpy.data.cameras.new(PLATE_OBJECT_PREFIX)
         camera_object = bpy.data.objects.new(PLATE_OBJECT_PREFIX, camera_data)
         self._link_to_plate_collection(context, camera_object)
@@ -349,6 +351,7 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         # aspect keeps the frame exact on both axes.
         context.scene.render.resolution_x = self.plate_width
         context.scene.render.resolution_y = self.plate_height
+        return camera_object
 
     def _link_to_plate_collection(self, context, camera_object):
         """Ensure the '_CP_' collection exists and link the camera into it."""
