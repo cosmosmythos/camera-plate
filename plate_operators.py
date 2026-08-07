@@ -1,5 +1,8 @@
 """Viewport-drag and resolution-dialog operators."""
 
+import os
+import subprocess
+
 import bpy
 import blf
 import gpu
@@ -11,26 +14,29 @@ from .plate_mapping import (
     compute_plate_camera,
     apply_to_camera,
 )
+from .plate_layers import add_layer, rebuild_tree, material_active
+from .plate_files import IMAGE_FILE_FORMATS, ensure_image_file, image_target_path
 
-MIN_DRAW_SIZE = 32  # pixels; smaller rectangles are discarded
+MIN_DRAW_SIZE = 8  # pixels; smaller rectangles are discarded
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 MIN_PLATE_RESOLUTION = 64
 
-HELP_FONT_SIZE = 13
+HELP_FONT_SIZE = 14
 HELP_COLOR = (1.0, 1.0, 0.1, 0.95)
 PLATE_OUTLINE_COLOR = (1.0, 1.0, 0.1, 1.0)
 PLATE_FILL_COLOR = (1.0, 1.0, 0.1, 0.25)
-PLATE_COLLECTION_NAME = "_CP_"
+PLATE_COLLECTION_NAME = "_CP_CAM"
 PLATE_OBJECT_PREFIX = "CP"
+PLATE_CAMERA_NAME = "CP_camera"
+DEFAULT_MATERIAL_NAME = "_CP_MAT"
 HELP_MARGIN_X = 12
 HELP_MARGIN_Y = 10
 HELP_LINE_SPACING = 1.35
 
 
 def _is_near_black(color) -> bool:
-    """True when a color's perceived luminance is near-black, so the text
-    shadow would be invisible and is skipped."""
+    """True when text shadowing would be invisible and is skipped."""
     def to_linear(channel: float) -> float:
         return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
 
@@ -42,7 +48,6 @@ def _is_near_black(color) -> bool:
 def _draw_label(
     text: str, x: float, y: float, color=HELP_COLOR, font_scale: float = 1.0
 ) -> tuple[float, float]:
-    """Draw shadowed text, auto-skip the shadow on dark colors."""
     font_id = 0
     blf.size(font_id, int(HELP_FONT_SIZE * font_scale))
     width, height = blf.dimensions(font_id, text)
@@ -60,14 +65,11 @@ def _draw_label(
     return width, height
 
 
-# Computed while the mouse is in the viewport; the dialog (no viewport
-# region) consumes it.
+# Computed while the mouse is in the viewport; the dialog (no viewport region) consumes it.
 _pending_plate_camera: PlateCamera | None = None
 
 
 class CameraPlateDrawOperator(bpy.types.Operator):
-    """Add a camera that frames the rectangle."""
-
     bl_idname = "cameraplate.draw"
     bl_label = "Draw Camera Frame"
     bl_description = "Draw a camera frame in the viewport"
@@ -98,8 +100,8 @@ class CameraPlateDrawOperator(bpy.types.Operator):
         # Wait for the first left-mouse press inside the viewport.
         if not self._drawing:
             if event.type == "MOUSEMOVE":
-                # Follow the cursor with the hint only: keep start == end
-                # so no rectangle is drawn until the viewport press.
+                # Follow the cursor with the hint only; no rectangle is drawn
+                # until the viewport press.
                 self._start_x = event.mouse_region_x
                 self._start_y = event.mouse_region_y
                 self._end_x = event.mouse_region_x
@@ -139,8 +141,7 @@ class CameraPlateDrawOperator(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        # Starting via the UI goes through invoke(); execute() keeps
-        # `bpy.ops.cameraplate.draw()` usable when no event is available.
+        # draw() without a drag event starts from the viewport centre.
         if context.region_data is None:
             self.report({"ERROR"}, "Please run this from a 3D viewport.")
             return {"CANCELLED"}
@@ -148,9 +149,6 @@ class CameraPlateDrawOperator(bpy.types.Operator):
         return self._enter_modal(context, region.width / 2.0, region.height / 2.0)
 
     def _enter_modal(self, context, start_x, start_y):
-        """Set the initial cursor spot, add the modal + draw handlers."""
-        # The rectangle only starts on the first click; the hint overlay
-        # is already up so the user knows what to do.
         self._drawing = False
         self._start_x = start_x
         self._start_y = start_y
@@ -175,7 +173,7 @@ class CameraPlateDrawOperator(bpy.types.Operator):
             return
         _pending_plate_camera = plate_camera
 
-        # Popups open at the cursor, so move it to the rect centre.
+        # Popups open at the cursor, so move it to the rectangle's centre.
         midpoint_x = (self._start_x + self._end_x) / 2.0
         midpoint_y = (self._start_y + self._end_y) / 2.0
         context.window.cursor_warp(
@@ -183,7 +181,7 @@ class CameraPlateDrawOperator(bpy.types.Operator):
             int(context.region.y + midpoint_y),
         )
 
-        # The default plate resolution keeps the rectangle's aspect ratio.
+        # Default plate resolution keeps the rectangle's aspect ratio.
         aspect = self.width / max(self.height, 1)
         if aspect >= 1.0:
             default_width = DEFAULT_WIDTH
@@ -197,7 +195,6 @@ class CameraPlateDrawOperator(bpy.types.Operator):
         )
 
     def _draw_help(self, context):
-        """Overlay hints under the cursor: what to do next, current size."""
         dpi_scale = getattr(context.preferences.system, "dpi", 72) / 72.0
         font_scale = getattr(context.preferences.view, "ui_scale", 1.0) * dpi_scale
 
@@ -256,8 +253,6 @@ class CameraPlateDrawOperator(bpy.types.Operator):
 
 
 class CameraPlateDialogOperator(bpy.types.Operator):
-    """Confirm the plate resolution, then create the camera."""
-
     bl_idname = "cameraplate.plate_dialog"
     bl_label = "Settings"
     bl_options = {"REGISTER", "UNDO"}
@@ -287,16 +282,44 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         description="Transparent image",
         default=True,
     )
-    image_float: bpy.props.BoolProperty(
-        name="32 bit",
-        description="32 bit float",
-        default=True,
+    image_format: bpy.props.EnumProperty(
+        name="Format",
+        description="File format for the generated image and Quick Edit exports",
+        default="EXR_16",
+        items=[
+            ("PNG", "PNG", ""),
+            ("JPEG", "JPEG", ""),
+            ("TIFF", "TIFF", ""),
+            ("EXR_16", "EXR 16-bit Float", ""),
+            ("EXR_32", "EXR 32-bit Float", ""),
+        ],
+    )
+    material_mode: bpy.props.EnumProperty(
+        name="Material",
+        description="Where to add the projection nodes",
+        items=[
+            ("CREATE", "New", ""),
+            ("EXISTING", "Existing", ""),
+        ],
+        default="CREATE",
+    )
+    material_name: bpy.props.StringProperty(
+        name="Name",
+        description="Material name; empty = _CP_MAT",
+        default="",
+    )
+    material_choice: bpy.props.StringProperty(
+        name="Material",
+        description="Existing material to add the projection to",
+        default="",
     )
 
     def invoke(self, context, event):
         if not self.image_name:
             self.image_name = f"{PLATE_OBJECT_PREFIX}_{self.plate_width}x{self.plate_height}"
-        return context.window_manager.invoke_props_dialog(self, width=200)
+        if not self.material_name:
+            self.material_name = DEFAULT_MATERIAL_NAME
+        return context.window_manager.invoke_props_dialog(self, width=220)
 
     def draw(self, context):
         layout = self.layout
@@ -306,8 +329,15 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         box = layout.box()
         box.enabled = self.create_image
         box.prop(self, "image_name")
-        box.prop(self, "image_alpha")
-        box.prop(self, "image_float")
+        box.prop(self, "image_format")
+        alpha_row = box.row()
+        alpha_row.enabled = self.image_format in {"PNG", "TIFF"}
+        alpha_row.prop(self, "image_alpha")
+        box.prop(self, "material_mode")
+        if self.material_mode == "EXISTING":
+            box.prop_search(self, "material_choice", bpy.data, "materials", text="")
+        else:
+            box.prop(self, "material_name")
 
     def execute(self, context):
         global _pending_plate_camera
@@ -320,29 +350,61 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         if self.create_image:
             image = self._create_image(context)
             camera_object["CP_image"] = image
+            self._create_material(camera_object, image)
         return {"FINISHED"}
 
     def _create_image(self, context):
+        exr = self.image_format.startswith("EXR")
+        alpha = self.image_alpha and self.image_format != "JPEG"
+        float_buffer = exr
         image = bpy.data.images.new(
             name=self.image_name or PLATE_OBJECT_PREFIX,
             width=self.plate_width,
             height=self.plate_height,
-            alpha=self.image_alpha,
-            float_buffer=self.image_float,
+            alpha=alpha or exr,
+            float_buffer=float_buffer,
         )
-        fill_alpha = 0.0 if self.image_alpha else 1.0
+        if float_buffer:
+            image.use_half_precision = self.image_format == "EXR_16"
+        image.file_format = IMAGE_FILE_FORMATS[self.image_format]
+        image.colorspace_settings.name = "Non-Color" if exr else "sRGB"
+        fill_alpha = 0.0 if alpha or exr else 1.0
         image.generated_type = "BLANK"
         image.generated_color = (0.0, 0.0, 0.0, fill_alpha)
         image.update()
+        # Give the datablock its future disk home right away, so the image
+        # carries the correct extension and connects to the Quick Edit file.
+        image.filepath_raw = image_target_path(image, self.image_format)
         return image
+
+    def _resolve_material(self, image):
+        if self.material_mode == "EXISTING":
+            material = bpy.data.materials.get(self.material_choice)
+            if material is not None:
+                return material
+            return self._new_material(DEFAULT_MATERIAL_NAME)
+
+        default_name = DEFAULT_MATERIAL_NAME
+        name = self.material_name or default_name
+        material = bpy.data.materials.get(name)
+        return material if material is not None else self._new_material(name)
+
+    def _create_material(self, camera_object, image):
+        material = self._resolve_material(image)
+        add_layer(material, image=image, camera=camera_object)
+        rebuild_tree(material)
+        return material
+
+    def _new_material(self, name):
+        return bpy.data.materials.new(name)
 
     def cancel(self, context):
         global _pending_plate_camera
         _pending_plate_camera = None
 
     def _create_camera(self, context, plate_camera: PlateCamera) -> bpy.types.Object:
-        camera_data = bpy.data.cameras.new(PLATE_OBJECT_PREFIX)
-        camera_object = bpy.data.objects.new(PLATE_OBJECT_PREFIX, camera_data)
+        camera_data = bpy.data.cameras.new(PLATE_CAMERA_NAME)
+        camera_object = bpy.data.objects.new(PLATE_CAMERA_NAME, camera_data)
         self._link_to_plate_collection(context, camera_object)
         apply_to_camera(camera_object, plate_camera)
         context.scene.camera = camera_object
@@ -354,7 +416,6 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         return camera_object
 
     def _link_to_plate_collection(self, context, camera_object):
-        """Ensure the '_CP_' collection exists and link the camera into it."""
         collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
         if collection is None:
             collection = bpy.data.collections.new(PLATE_COLLECTION_NAME)
@@ -362,4 +423,135 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         collection.objects.link(camera_object)
 
 
-OPERATORS = (CameraPlateDrawOperator, CameraPlateDialogOperator)
+class CameraPlateQuickEditOperator(bpy.types.Operator):
+    bl_idname = "cameraplate.quick_edit"
+    bl_label = "Quick Edit"
+    bl_description = "Open the active layer's image in the external editor set in Blender preferences"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        material = material_active(context)
+        if material is None:
+            self.report({"ERROR"}, "Select an object with a material.")
+            return {"CANCELLED"}
+        plate = material.plate
+        if len(plate.layers) == 0:
+            self.report({"ERROR"}, "No plate layers to edit.")
+            return {"CANCELLED"}
+        index = min(plate.active_layer_index, len(plate.layers) - 1)
+        layer = plate.layers[index]
+        if layer.image is None:
+            self.report({"ERROR"}, "The active layer has no image.")
+            return {"CANCELLED"}
+
+        editor = context.preferences.filepaths.image_editor
+        if not editor:
+            self.report(
+                {"ERROR"},
+                "Set an external image editor in Preferences > File Paths.",
+            )
+            return {"CANCELLED"}
+
+        try:
+            path = ensure_image_file(layer)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not write the image to disk: {exc}")
+            return {"CANCELLED"}
+
+        try:
+            subprocess.Popen([editor, path])
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to launch editor: {exc}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CameraPlateReloadImageOperator(bpy.types.Operator):
+    bl_idname = "cameraplate.reload_image"
+    bl_label = "Reload"
+    bl_description = "Reload the active layer's image from disk, picking up external edits"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        material = material_active(context)
+        if material is None:
+            self.report({"ERROR"}, "Select an object with a material.")
+            return {"CANCELLED"}
+        plate = material.plate
+        if len(plate.layers) == 0:
+            self.report({"ERROR"}, "No plate layers to edit.")
+            return {"CANCELLED"}
+        index = min(plate.active_layer_index, len(plate.layers) - 1)
+        layer = plate.layers[index]
+        if layer.image is None:
+            self.report({"ERROR"}, "The active layer has no image.")
+            return {"CANCELLED"}
+        absolute = bpy.path.abspath(layer.image.filepath)
+        if not layer.image.filepath or not os.path.exists(absolute):
+            self.report({"ERROR"}, "The image has no file on disk to reload.")
+            return {"CANCELLED"}
+        layer.image.reload()
+        return {"FINISHED"}
+
+
+class CameraPlateLayerRemoveOperator(bpy.types.Operator):
+    bl_idname = "cameraplate.layer_remove"
+    bl_label = "Remove Layer"
+    bl_description = "Remove the active layer from the plate stack"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        material = material_active(context)
+        if material is None:
+            self.report({"ERROR"}, "Select an object with a material.")
+            return {"CANCELLED"}
+        plate = material.plate
+        if len(plate.layers) == 0:
+            return {"CANCELLED"}
+        index = min(plate.active_layer_index, len(plate.layers) - 1)
+        plate.layers.remove(index)
+        plate.active_layer_index = min(plate.active_layer_index, len(plate.layers) - 1)
+        rebuild_tree(material)
+        return {"FINISHED"}
+
+
+class CameraPlateLayerMoveOperator(bpy.types.Operator):
+    bl_idname = "cameraplate.layer_move"
+    bl_label = "Move Layer"
+    bl_description = "Move the active layer up or down the stack"
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: bpy.props.EnumProperty(
+        name="Direction",
+        items=[
+            ("UP", "Up", ""),
+            ("DOWN", "Down", ""),
+        ],
+    )
+
+    def execute(self, context):
+        material = material_active(context)
+        if material is None:
+            self.report({"ERROR"}, "Select an object with a material.")
+            return {"CANCELLED"}
+        plate = material.plate
+        if len(plate.layers) < 2:
+            return {"CANCELLED"}
+        index = min(plate.active_layer_index, len(plate.layers) - 1)
+        target = index - 1 if self.direction == "UP" else index + 1
+        if not (0 <= target < len(plate.layers)):
+            return {"CANCELLED"}
+        plate.layers.move(index, target)
+        plate.active_layer_index = target
+        rebuild_tree(material)
+        return {"FINISHED"}
+
+
+OPERATORS = (
+    CameraPlateDrawOperator,
+    CameraPlateDialogOperator,
+    CameraPlateQuickEditOperator,
+    CameraPlateReloadImageOperator,
+    CameraPlateLayerRemoveOperator,
+    CameraPlateLayerMoveOperator,
+)

@@ -1,10 +1,9 @@
-"""Unproject a screen-space rectangle into camera framing parameters."""
+"""Viewport-selection math to camera parameters."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import bpy
 from bpy_extras import view3d_utils
@@ -14,8 +13,6 @@ from mathutils.geometry import intersect_line_plane
 
 @dataclass
 class RegionSelection:
-    """A rectangle the user dragged, in region (screen) pixel coordinates."""
-
     start_x: float
     start_y: float
     end_x: float
@@ -48,8 +45,6 @@ class RegionSelection:
 
 @dataclass
 class PlateCamera:
-    """The camera parameters that frame the drawn rectangle."""
-
     world_matrix: Matrix
     is_perspective: bool
     lens_mm: float
@@ -60,7 +55,7 @@ class PlateCamera:
 
 
 def _view_geometry(region_3d) -> tuple[Vector, Vector, Vector, Vector]:
-    """Return (eye, screen_right, screen_up, forward) of the 3D viewport."""
+    """(eye, screen_right, screen_up, forward) of the 3D viewport; the lens field is not a real lens."""
     eye = region_3d.view_matrix.inverted().translation
     orientation = region_3d.view_rotation
     return (
@@ -72,14 +67,8 @@ def _view_geometry(region_3d) -> tuple[Vector, Vector, Vector, Vector]:
 
 
 def _unproject_to_plane(
-    region,
-    region_3d,
-    screen_x: float,
-    screen_y: float,
-    plane_point: Vector,
-    plane_normal: Vector,
-) -> Optional[Vector]:
-    """Convert a screen pixel to its world point on the given plane."""
+    region, region_3d, screen_x: float, screen_y: float, plane_point: Vector, plane_normal: Vector
+) -> Vector | None:
     origin = view3d_utils.region_2d_to_origin_3d(region, region_3d, Vector((screen_x, screen_y)))
     direction = view3d_utils.region_2d_to_vector_3d(region, region_3d, Vector((screen_x, screen_y)))
     if origin is None or direction is None:
@@ -89,16 +78,9 @@ def _unproject_to_plane(
 
 
 def compute_plate_camera(
-    region,
-    region_3d,
-    selection: RegionSelection,
-    sensor_mm: float = 36.0,
-) -> Optional[PlateCamera]:
-    """Derive a camera matching the drawn rectangle's frame.
-
-    Pose matches the viewport; FOV derives from the rect's world size.
-    space.lens is *not* a real camera lens, so it is ignored.
-    """
+    region, region_3d, selection: RegionSelection, sensor_mm: float = 36.0
+) -> PlateCamera | None:
+    """Pose matches the viewport; FOV derives from the rect's world size (Space.lens is ignored)."""
     eye, screen_right, screen_up, forward = _view_geometry(region_3d)
     plane_point = eye + forward  # the sensor plane sits one world unit ahead
 
@@ -110,8 +92,7 @@ def compute_plate_camera(
     right = left + selection.width
     top = bottom + selection.height
 
-    # Un-project each corner, clamped just inside the window so the
-    # rays never degenerate at the viewport edge.
+    # Clamp just inside the window so rays never degenerate at the viewport edge.
     corners_world = []
     for corner_x, corner_y in ((left, bottom), (right, bottom), (left, top), (right, top)):
         clamped_x = min(max(corner_x, 1.0), region.width - 1.0)
@@ -139,8 +120,8 @@ def compute_plate_camera(
         half_angle = math.atan(world_width / 2.0 / focal_distance)
         lens_mm = (sensor_mm / 2.0) / math.tan(half_angle)
 
-        # Shift is a fraction of the sensor width; divided by the rect's own
-        # world width, so it re-centres a rect drawn off the viewport axis.
+        # Shift is a fraction of the sensor width; dividing by the rect's own
+        # world width re-centres a rect drawn off the viewport axis.
         shift_x = center_offset_right / world_width
         shift_y = center_offset_up / world_width
         ortho_scale = 0.0
@@ -162,7 +143,6 @@ def compute_plate_camera(
 
 
 def apply_to_camera(camera_object: bpy.types.Object, plate_camera: PlateCamera) -> None:
-    """Apply a computed frame to an existing camera object."""
     camera_object.matrix_world = plate_camera.world_matrix
     camera_data = camera_object.data
     camera_data.type = "PERSP" if plate_camera.is_perspective else "ORTHO"

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 id = "camera_plate"
 name = "Camera Plate"
-version = "0.1.0"
+version = "1.0.0"
 tagline = "Draw a rectangle in the viewport. Get a camera that matches its frame."
 maintainer = "cosmosmythos"
 type = "add-on"
