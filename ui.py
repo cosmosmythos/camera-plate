@@ -13,7 +13,7 @@ class CAMERAPLATE_PT_main(bpy.types.Panel):
     bl_category = "Plate"
 
     def draw(self, context):
-        self.layout.operator("cameraplate.draw", text="Add Camera Plate", icon="VIEW_CAMERA")
+        self.layout.operator("cameraplate.draw", text="Draw Camera Frame", icon="VIEW_CAMERA")
 
 
 PANELS = (CAMERAPLATE_PT_main,)

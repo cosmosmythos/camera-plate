@@ -69,7 +69,7 @@ class CameraPlateDrawOperator(bpy.types.Operator):
     """Add a camera that frames the rectangle."""
 
     bl_idname = "cameraplate.draw"
-    bl_label = "Add Camera Plate"
+    bl_label = "Draw Camera Frame"
     bl_description = "Draw a camera frame in the viewport"
     bl_options = {"REGISTER", "UNDO"}
 
@@ -202,14 +202,14 @@ class CameraPlateDrawOperator(bpy.types.Operator):
         font_scale = getattr(context.preferences.view, "ui_scale", 1.0) * dpi_scale
 
         if self._drawing:
-            lines = ["Release LMB to confirm the plate · Esc to cancel"]
+            lines = ["Release LMB to confirm · Esc to cancel"]
             if self.width >= 2 and self.height >= 2:
                 lines.append(
                     f"{int(self.width)}x{int(self.height)}px · "
                     f"{self.width / max(self.height, 1):.2f} aspect"
                 )
         else:
-            lines = ["Click and drag to draw the plate · Esc to cancel"]
+            lines = ["Click and drag to draw · Esc to cancel"]
         x = self._end_x + HELP_MARGIN_X
         y = self._end_y + HELP_MARGIN_Y
         for line in lines:
@@ -259,37 +259,80 @@ class CameraPlateDialogOperator(bpy.types.Operator):
     """Confirm the plate resolution, then create the camera."""
 
     bl_idname = "cameraplate.plate_dialog"
-    bl_label = "Camera Plate Resolution"
+    bl_label = "Settings"
     bl_options = {"REGISTER", "UNDO"}
 
     plate_width: bpy.props.IntProperty(
         name="Width",
-        description="Plate width in pixels",
+        description="Image width",
         default=DEFAULT_WIDTH, min=32, max=16384,
     )
     plate_height: bpy.props.IntProperty(
         name="Height",
-        description="Plate height in pixels",
+        description="Image height",
         default=DEFAULT_HEIGHT, min=32, max=16384,
+    )
+    create_image: bpy.props.BoolProperty(
+        name="Create Image",
+        description="Create a blank image",
+        default=True,
+    )
+    image_name: bpy.props.StringProperty(
+        name="Name",
+        description="Image name",
+        default="",
+    )
+    image_alpha: bpy.props.BoolProperty(
+        name="Transparent",
+        description="Transparent image",
+        default=True,
+    )
+    image_float: bpy.props.BoolProperty(
+        name="32 bit",
+        description="32-bit float color",
+        default=True,
     )
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=360)
+        if not self.image_name:
+            self.image_name = f"{PLATE_OBJECT_PREFIX}_{self.plate_width}x{self.plate_height}"
+        return context.window_manager.invoke_props_dialog(self, width=200)
 
     def draw(self, context):
-        row = self.layout.row()
-        row.prop(self, "plate_width")
-        row.prop(self, "plate_height")
+        layout = self.layout
+        layout.prop(self, "plate_width")
+        layout.prop(self, "plate_height")
+        layout.prop(self, "create_image")
+        box = layout.box()
+        box.enabled = self.create_image
+        box.prop(self, "image_name")
+        box.prop(self, "image_alpha")
+        box.prop(self, "image_float")
 
     def execute(self, context):
         global _pending_plate_camera
         plate_camera = _pending_plate_camera
         _pending_plate_camera = None
         if plate_camera is None:
-            self.report({"ERROR"}, "No pending plate rectangle; draw one first.")
+            self.report({"ERROR"}, "Draw camera frame first.")
             return {"CANCELLED"}
         self._create_camera(context, plate_camera)
+        if self.create_image:
+            self._create_image(context)
         return {"FINISHED"}
+
+    def _create_image(self, context):
+        image = bpy.data.images.new(
+            name=self.image_name or PLATE_OBJECT_PREFIX,
+            width=self.plate_width,
+            height=self.plate_height,
+            alpha=self.image_alpha,
+            float_buffer=self.image_float,
+        )
+        fill_alpha = 0.0 if self.image_alpha else 1.0
+        image.generated_type = "BLANK"
+        image.generated_color = (0.0, 0.0, 0.0, fill_alpha)
+        image.update()
 
     def cancel(self, context):
         global _pending_plate_camera
@@ -306,12 +349,6 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         # aspect keeps the frame exact on both axes.
         context.scene.render.resolution_x = self.plate_width
         context.scene.render.resolution_y = self.plate_height
-
-        self.report(
-            {"INFO"},
-            f"Camera frame created: {camera_object.name} "
-            f"({self.plate_width}x{self.plate_height})",
-        )
 
     def _link_to_plate_collection(self, context, camera_object):
         """Ensure the '_CP_' collection exists and link the camera into it."""
