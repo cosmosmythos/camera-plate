@@ -26,10 +26,10 @@ HELP_FONT_SIZE = 14
 HELP_COLOR = (1.0, 1.0, 0.1, 0.95)
 PLATE_OUTLINE_COLOR = (1.0, 1.0, 0.1, 1.0)
 PLATE_FILL_COLOR = (1.0, 1.0, 0.1, 0.25)
-PLATE_COLLECTION_NAME = "_CP_CAM"
-PLATE_OBJECT_PREFIX = "CP"
-PLATE_CAMERA_NAME = "CP_camera"
-DEFAULT_MATERIAL_NAME = "_CP_MAT"
+PLATE_COLLECTION_NAME = "_PRJ_CAM"
+PLATE_OBJECT_PREFIX = "PRJ"
+PLATE_CAMERA_NAME = "PRJ_camera"
+DEFAULT_MATERIAL_NAME = "_PRJ_MAT"
 HELP_MARGIN_X = 12
 HELP_MARGIN_Y = 10
 HELP_LINE_SPACING = 1.35
@@ -69,8 +69,8 @@ def _draw_label(
 _pending_plate_camera: PlateCamera | None = None
 
 
-class CameraPlateDrawOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.draw"
+class ProjectionCamDrawOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.draw"
     bl_label = "Draw Camera Frame"
     bl_description = "Draw a camera frame in the viewport"
     bl_options = {"REGISTER", "UNDO"}
@@ -190,7 +190,7 @@ class CameraPlateDrawOperator(bpy.types.Operator):
             default_height = DEFAULT_HEIGHT
             default_width = max(round(DEFAULT_HEIGHT * aspect), MIN_PLATE_RESOLUTION)
 
-        bpy.ops.cameraplate.plate_dialog(
+        bpy.ops.projectioncam.plate_dialog(
             "INVOKE_DEFAULT", plate_width=default_width, plate_height=default_height
         )
 
@@ -252,8 +252,8 @@ class CameraPlateDrawOperator(bpy.types.Operator):
             self._handle = None
 
 
-class CameraPlateDialogOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.plate_dialog"
+class ProjectionCamDialogOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.plate_dialog"
     bl_label = "Settings"
     bl_options = {"REGISTER", "UNDO"}
 
@@ -305,7 +305,7 @@ class CameraPlateDialogOperator(bpy.types.Operator):
     )
     material_name: bpy.props.StringProperty(
         name="Name",
-        description="Material name; empty = _CP_MAT",
+        description="Material name; empty = _PRJ_MAT",
         default="",
     )
     material_choice: bpy.props.StringProperty(
@@ -423,8 +423,8 @@ class CameraPlateDialogOperator(bpy.types.Operator):
         collection.objects.link(camera_object)
 
 
-class CameraPlateQuickEditOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.quick_edit"
+class ProjectionCamQuickEditOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.quick_edit"
     bl_label = "Quick Edit"
     bl_description = "Open the active layer's image in the external editor set in Blender preferences"
     bl_options = {"REGISTER"}
@@ -466,8 +466,8 @@ class CameraPlateQuickEditOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CameraPlateReloadImageOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.reload_image"
+class ProjectionCamReloadImageOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.reload_image"
     bl_label = "Reload"
     bl_description = "Reload the active layer's image from disk, picking up external edits"
     bl_options = {"REGISTER"}
@@ -494,8 +494,8 @@ class CameraPlateReloadImageOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CameraPlateLayerRemoveOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.layer_remove"
+class ProjectionCamLayerRemoveOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.layer_remove"
     bl_label = "Remove Layer"
     bl_description = "Remove the active layer from the plate stack"
     bl_options = {"REGISTER", "UNDO"}
@@ -515,8 +515,8 @@ class CameraPlateLayerRemoveOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CameraPlateLayerMoveOperator(bpy.types.Operator):
-    bl_idname = "cameraplate.layer_move"
+class ProjectionCamLayerMoveOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.layer_move"
     bl_label = "Move Layer"
     bl_description = "Move the active layer up or down the stack"
     bl_options = {"REGISTER", "UNDO"}
@@ -548,10 +548,10 @@ class CameraPlateLayerMoveOperator(bpy.types.Operator):
 
 
 OPERATORS = (
-    CameraPlateDrawOperator,
-    CameraPlateDialogOperator,
-    CameraPlateQuickEditOperator,
-    CameraPlateReloadImageOperator,
-    CameraPlateLayerRemoveOperator,
-    CameraPlateLayerMoveOperator,
+    ProjectionCamDrawOperator,
+    ProjectionCamDialogOperator,
+    ProjectionCamQuickEditOperator,
+    ProjectionCamReloadImageOperator,
+    ProjectionCamLayerRemoveOperator,
+    ProjectionCamLayerMoveOperator,
 )

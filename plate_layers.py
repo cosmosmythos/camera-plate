@@ -80,7 +80,7 @@ def _layer_changed(self, _context):
         _request_rebuild(material)
 
 
-class CAMERAPLATE_Layer(bpy.types.PropertyGroup):
+class PROJECTIONCAM_Layer(bpy.types.PropertyGroup):
     image: bpy.props.PointerProperty(
         name="Image",
         type=bpy.types.Image,
@@ -127,8 +127,8 @@ class CAMERAPLATE_Layer(bpy.types.PropertyGroup):
     )
 
 
-class CAMERAPLATE_PlateProps(bpy.types.PropertyGroup):
-    layers: bpy.props.CollectionProperty(type=CAMERAPLATE_Layer)
+class PROJECTIONCAM_PlateProps(bpy.types.PropertyGroup):
+    layers: bpy.props.CollectionProperty(type=PROJECTIONCAM_Layer)
     active_layer_index: bpy.props.IntProperty(
         name="Active Layer Index",
         default=0,
@@ -136,7 +136,7 @@ class CAMERAPLATE_PlateProps(bpy.types.PropertyGroup):
     )
 
 
-PROPERTY_GROUPS = (CAMERAPLATE_Layer, CAMERAPLATE_PlateProps)
+PROPERTY_GROUPS = (PROJECTIONCAM_Layer, PROJECTIONCAM_PlateProps)
 
 
 def material_active(context) -> bpy.types.Material | None:
@@ -145,7 +145,7 @@ def material_active(context) -> bpy.types.Material | None:
     return None
 
 
-def add_layer(material, image, camera) -> CAMERAPLATE_Layer:
+def add_layer(material, image, camera) -> PROJECTIONCAM_Layer:
     """Insert a layer at the top of the stack (index 0 composites last, i.e. painted on top)."""
     global _suppress_rebuild
     _suppress_rebuild = True
@@ -335,7 +335,7 @@ def _load_post(_dummy) -> None:
 def register() -> None:
     for cls in PROPERTY_GROUPS:
         bpy.utils.register_class(cls)
-    bpy.types.Material.plate = bpy.props.PointerProperty(type=CAMERAPLATE_PlateProps)
+    bpy.types.Material.plate = bpy.props.PointerProperty(type=PROJECTIONCAM_PlateProps)
 
     # A saved .blend carries the old tree from the last session, so enable
     # must not trust it: swap the group and rebuild every stack up front.

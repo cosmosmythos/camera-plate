@@ -1,4 +1,4 @@
-"""Append-and-version the shipped ``CP_Projector`` node group."""
+"""Append-and-version the shipped ``PRJ_Projector`` node group."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import traceback
 
 import bpy
 
-GROUP_NAME = "CP_Projector"
-BLEND_FILENAME = "CP_projector.blend"
+GROUP_NAME = "PRJ_Projector"
+BLEND_FILENAME = "PRJ_Projector.blend"
 
-# Matches Blender's auto-suffixed duplicates: "CP_Projector.001".
+# Matches Blender's auto-suffixed duplicates: "PRJ_Projector.001".
 _ORPHAN_SUFFIX = re.compile(r"^" + re.escape(GROUP_NAME) + r"\.\d+$")
 
 
@@ -92,7 +92,7 @@ def _find_group_references(
 
 
 def cleanup_orphan_copies() -> bool:
-    """Remove unused ``CP_Projector.001``-style leftovers (safe: only removed when nothing uses them)."""
+    """Remove unused ``PRJ_Projector.001``-style leftovers (safe: only removed when nothing uses them)."""
     removed_any = False
     for group in list(bpy.data.node_groups):
         if not _ORPHAN_SUFFIX.match(group.name):
