@@ -33,6 +33,12 @@ class PROJECTIONCAM_PT_main(bpy.types.Panel):
         layout = self.layout
         layout.operator("projectioncam.draw", text="Draw Camera Frame", icon="VIEW_CAMERA")
 
+        hidden = context.scene.prj_cameras_hidden
+        layout.operator(
+            "projectioncam.toggle_camera_visibility",
+            text="Show Cameras" if hidden else "Hide Cameras",
+        )
+
         material = material_active(context)
         if material is None:
             layout.label(text="No material on the active object.", icon="INFO")
@@ -66,6 +72,7 @@ class PROJECTIONCAM_PT_main(bpy.types.Panel):
         box.prop(layer, "blend_mode")
         box.prop(layer, "format")
         box.prop(layer, "mix_factor", slider=True)
+        box.prop(context.scene, "prj_export_baselayer", text="Export Base Layer")
         row = box.row(align=True)
         row.operator("projectioncam.quick_edit", text="Quick Edit", icon="IMAGE_DATA")
         row.operator("projectioncam.reload_image", text="", icon="FILE_REFRESH")

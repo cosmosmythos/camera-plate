@@ -1,7 +1,10 @@
 """Viewport-drag and resolution-dialog operators."""
 
 import os
+import signal
 import subprocess
+import sys
+import time
 
 import bpy
 import blf
@@ -16,6 +19,7 @@ from .plate_mapping import (
 )
 from .plate_layers import add_layer, rebuild_tree, material_active
 from .plate_files import IMAGE_FILE_FORMATS, ensure_image_file, image_target_path
+from .plate_render import bake_baselayer
 
 MIN_DRAW_SIZE = 8  # pixels; smaller rectangles are discarded
 DEFAULT_WIDTH = 1920
@@ -33,6 +37,71 @@ DEFAULT_MATERIAL_NAME = "_PRJ_MAT"
 HELP_MARGIN_X = 12
 HELP_MARGIN_Y = 10
 HELP_LINE_SPACING = 1.35
+EDITOR_PROBE_TIMEOUT = 10  # seconds; process tools must not block Quick Edit forever
+EDITOR_CLOSE_WAIT = 60  # seconds; grace for the editor's own save prompts during a close
+
+
+# Only this session's own Quick Edit launches are ever closed; poll() is handle-based, immune to PID reuse.
+_launched_editors: dict[int, subprocess.Popen] = {}
+
+
+def _has_our_editor_running() -> bool:
+    return any(proc.poll() is None for proc in _launched_editors.values())
+
+
+def _run_process(command) -> bool:
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=EDITOR_PROBE_TIMEOUT
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _signal_editor(pid: int, sig) -> bool:
+    """Signal the whole process group; editors are launched in their own session."""
+    try:
+        os.killpg(pid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _close_editor(pid: int, force: bool = False) -> bool:
+    """Ask the editor to exit; force escalates to an unconditional kill."""
+    if os.name == "nt":
+        # Without /F, taskkill posts WM_CLOSE so the editor can save first.
+        flags = ["/F", "/PID", str(pid), "/T"] if force else ["/PID", str(pid), "/T"]
+        return _run_process(["taskkill", *flags])
+    return _signal_editor(pid, signal.SIGKILL if force else signal.SIGTERM)
+
+
+def _wait_for_close(proc, seconds: float) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline and proc.poll() is None:
+        time.sleep(0.25)
+    return proc.poll() is not None
+
+
+def _close_our_editors() -> bool:
+    """Close every editor this session's Quick Edit launched; False when any survives."""
+    for pid, proc in list(_launched_editors.items()):
+        if proc.poll() is None:
+            if not _close_editor(pid) or not _wait_for_close(proc, EDITOR_CLOSE_WAIT):
+                _close_editor(pid, force=True)
+                if not _wait_for_close(proc, EDITOR_PROBE_TIMEOUT):
+                    return False
+        del _launched_editors[pid]
+    return True
+
+
+def _editor_command(editor_path: str) -> list[str]:
+    """Blender's own launcher (bl_operators/image.py); macOS routes .app bundles to a running instance."""
+    if sys.platform != "darwin":
+        return [editor_path]
+    # The file selector treats .app as a folder and appends a trailing backslash.
+    return ["open", "-a", editor_path.rstrip("\\")]
 
 
 def _is_near_black(color) -> bool:
@@ -252,6 +321,33 @@ class ProjectionCamDrawOperator(bpy.types.Operator):
             self._handle = None
 
 
+def _is_plate_camera(camera_object) -> bool:
+    """True for cameras we created, so our own camera is never saved as the user's."""
+    collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
+    return collection is not None and camera_object.name in collection.all_objects
+
+
+def _plate_cameras() -> list[bpy.types.Object]:
+    collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
+    if collection is None:
+        return []
+    return [obj for obj in collection.all_objects if obj.type == "CAMERA"]
+
+
+class ProjectionCamToggleCameraVisibilityOperator(bpy.types.Operator):
+    bl_idname = "projectioncam.toggle_camera_visibility"
+    bl_label = "Toggle Camera Visibility"
+    bl_description = "Hide or show all projection cameras in the viewport"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        hidden = not context.scene.prj_cameras_hidden
+        for camera in _plate_cameras():
+            camera.hide_viewport = hidden
+        context.scene.prj_cameras_hidden = hidden
+        return {"FINISHED"}
+
+
 class ProjectionCamDialogOperator(bpy.types.Operator):
     bl_idname = "projectioncam.plate_dialog"
     bl_label = "Settings"
@@ -259,39 +355,34 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
 
     plate_width: bpy.props.IntProperty(
         name="Width",
-        description="Image width",
         default=DEFAULT_WIDTH, min=32, max=16384,
     )
     plate_height: bpy.props.IntProperty(
         name="Height",
-        description="Image height",
         default=DEFAULT_HEIGHT, min=32, max=16384,
     )
     create_image: bpy.props.BoolProperty(
         name="Create Image",
-        description="Create a blank image",
         default=True,
     )
     image_name: bpy.props.StringProperty(
         name="Name",
-        description="Image name",
         default="",
     )
     image_alpha: bpy.props.BoolProperty(
         name="Transparent",
-        description="Transparent image",
         default=True,
     )
     image_format: bpy.props.EnumProperty(
         name="Format",
         description="File format for the generated image and Quick Edit exports",
-        default="EXR_16",
+        default="EXR_32",
         items=[
             ("PNG", "PNG", ""),
             ("JPEG", "JPEG", ""),
             ("TIFF", "TIFF", ""),
-            ("EXR_16", "EXR 16-bit Float", ""),
-            ("EXR_32", "EXR 32-bit Float", ""),
+            ("EXR_16", "EXR 16-bit", ""),
+            ("EXR_32", "EXR 32-bit", ""),
         ],
     )
     material_mode: bpy.props.EnumProperty(
@@ -301,7 +392,7 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
             ("CREATE", "New", ""),
             ("EXISTING", "Existing", ""),
         ],
-        default="CREATE",
+        default="EXISTING",
     )
     material_name: bpy.props.StringProperty(
         name="Name",
@@ -364,6 +455,9 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
             alpha=alpha or exr,
             float_buffer=float_buffer,
         )
+        # Popup snapshots can lose the pick between steps (Blender 5.2), so
+        # the choice rides the image itself, the object the layer step holds.
+        image["prj_format"] = self.image_format
         if float_buffer:
             image.use_half_precision = self.image_format == "EXR_16"
         image.file_format = IMAGE_FILE_FORMATS[self.image_format]
@@ -374,7 +468,7 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
         image.update()
         # Give the datablock its future disk home right away, so the image
         # carries the correct extension and connects to the Quick Edit file.
-        image.filepath_raw = image_target_path(image, self.image_format)
+        image.filepath_raw = image_target_path(image.name, self.image_format)
         return image
 
     def _resolve_material(self, image):
@@ -391,7 +485,9 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
 
     def _create_material(self, camera_object, image):
         material = self._resolve_material(image)
-        add_layer(material, image=image, camera=camera_object)
+        layer = add_layer(material, image=image, camera=camera_object)
+        # Read the choice the popup made, as recorded on the image itself.
+        layer.format = image.get("prj_format") or self.image_format
         rebuild_tree(material)
         return material
 
@@ -403,16 +499,26 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
         _pending_plate_camera = None
 
     def _create_camera(self, context, plate_camera: PlateCamera) -> bpy.types.Object:
+        scene = context.scene
+        previous_camera = scene.camera
+        if previous_camera is not None and _is_plate_camera(previous_camera):
+            previous_camera = None
+
         camera_data = bpy.data.cameras.new(PLATE_CAMERA_NAME)
         camera_object = bpy.data.objects.new(PLATE_CAMERA_NAME, camera_data)
         self._link_to_plate_collection(context, camera_object)
         apply_to_camera(camera_object, plate_camera)
-        context.scene.camera = camera_object
+        scene.camera = camera_object
 
         # The render aspect follows the plate resolution; matching the rect
         # aspect keeps the frame exact on both axes.
-        context.scene.render.resolution_x = self.plate_width
-        context.scene.render.resolution_y = self.plate_height
+        scene.render.resolution_x = self.plate_width
+        scene.render.resolution_y = self.plate_height
+
+        # The plate camera only projects the plate; the user's own camera is
+        # not ours to take, so give it back right away.
+        if previous_camera is not None:
+            scene.camera = previous_camera
         return camera_object
 
     def _link_to_plate_collection(self, context, camera_object):
@@ -429,7 +535,21 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
     bl_description = "Open the active layer's image in the external editor set in Blender preferences"
     bl_options = {"REGISTER"}
 
+    def invoke(self, context, event):
+        editor = context.preferences.filepaths.image_editor
+        if editor and _has_our_editor_running():
+            self._relaunch_requested = True
+            return context.window_manager.invoke_props_dialog(self, width=460)
+        return self.execute(context)
+
+    def draw(self, context):
+        editor = context.preferences.filepaths.image_editor
+        self.layout.label(text=f"{os.path.basename(editor)} is still running from a previous Quick Edit.")
+        self.layout.label(text="Quick Edit will close it and relaunch it with the plate files.")
+        self.layout.label(text="Unsaved changes in the editor will be lost.", icon="ERROR")
+
     def execute(self, context):
+        self._relaunch_requested = getattr(self, "_relaunch_requested", False)
         material = material_active(context)
         if material is None:
             self.report({"ERROR"}, "Select an object with a material.")
@@ -452,17 +572,42 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
+        if _has_our_editor_running():
+            if not self._relaunch_requested:
+                self.report(
+                    {"ERROR"},
+                    "The editor from a previous Quick Edit is still running; close it before Quick Edit.",
+                )
+                return {"CANCELLED"}
+            if not _close_our_editors():
+                self.report(
+                    {"ERROR"},
+                    "The previous editor instance is still running; close it manually and try again.",
+                )
+                return {"CANCELLED"}
+
+        baselayer_path = None
+        if context.scene.prj_export_baselayer:
+            baselayer_path = bake_baselayer(context, layer)
+            if baselayer_path is None:
+                self.report({"WARNING"}, "Could not bake the base layer image.")
+
         try:
             path = ensure_image_file(layer)
         except Exception as exc:
             self.report({"ERROR"}, f"Could not write the image to disk: {exc}")
             return {"CANCELLED"}
 
+        command = _editor_command(editor) + [path]
+        if baselayer_path is not None:
+            command.append(baselayer_path)
         try:
-            subprocess.Popen([editor, path])
+            proc = subprocess.Popen(command, start_new_session=(os.name != "nt"))
         except Exception as exc:
             self.report({"ERROR"}, f"Failed to launch editor: {exc}")
             return {"CANCELLED"}
+        # The new session lets killpg() reach the whole tree; Windows taskkill /T covers the same ground.
+        _launched_editors[proc.pid] = proc
         return {"FINISHED"}
 
 
@@ -491,6 +636,10 @@ class ProjectionCamReloadImageOperator(bpy.types.Operator):
             self.report({"ERROR"}, "The image has no file on disk to reload.")
             return {"CANCELLED"}
         layer.image.reload()
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type in {"VIEW_3D", "IMAGE_EDITOR"}:
+                    area.tag_redraw()
         return {"FINISHED"}
 
 
@@ -554,4 +703,5 @@ OPERATORS = (
     ProjectionCamReloadImageOperator,
     ProjectionCamLayerRemoveOperator,
     ProjectionCamLayerMoveOperator,
+    ProjectionCamToggleCameraVisibilityOperator,
 )
