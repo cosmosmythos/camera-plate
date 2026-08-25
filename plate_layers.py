@@ -453,9 +453,13 @@ def register() -> None:
         bpy.utils.register_class(cls)
     bpy.types.Material.plate = bpy.props.PointerProperty(type=PROJECTIONCAM_PlateProps)
     bpy.types.Scene.prj_export_baselayer = bpy.props.BoolProperty(
-        name="Export Base Layer",
+        name="Export Base Image",
         description="Bake a rendered frame from the active layer's camera when Quick Edit runs",
         default=True,
+    )
+    bpy.types.Scene.prj_layer_settings_expanded = bpy.props.BoolProperty(
+        name="Layer Settings Expanded",
+        default=False,
     )
     bpy.types.Scene.prj_bake_engine = bpy.props.EnumProperty(
         name="Bake Engine",
@@ -499,6 +503,7 @@ def unregister() -> None:
 
     del bpy.types.Material.plate
     del bpy.types.Scene.prj_export_baselayer
+    del bpy.types.Scene.prj_layer_settings_expanded
     del bpy.types.Scene.prj_bake_engine
     del bpy.types.Scene.prj_bake_samples
     del bpy.types.Scene.prj_cameras_hidden

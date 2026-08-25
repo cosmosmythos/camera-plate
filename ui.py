@@ -66,20 +66,32 @@ class PROJECTIONCAM_PT_main(bpy.types.Panel):
             layout.label(text="Draw a frame to create the first layer.", icon="INFO")
             return
 
-        layer = plate.layers[plate.active_layer_index]
+        scene = context.scene
+        header = layout.row(align=True)
+        header.prop(
+            scene,
+            "prj_layer_settings_expanded",
+            icon="TRIA_DOWN" if scene.prj_layer_settings_expanded else "TRIA_RIGHT",
+            icon_only=True,
+            emboss=False,
+        )
+        header.label(text="Layer Settings")
+        if scene.prj_layer_settings_expanded:
+            layer = plate.layers[plate.active_layer_index]
+            settings = layout.column(align=True)
+            settings.prop(layer, "blend_mode", text="")
+            settings.prop(layer, "format", text="")
+            settings.prop(layer, "mix_factor", slider=True)
+
         box = layout.box()
-        box.label(text="Active Layer", icon="TEXTURE")
-        box.prop(layer, "blend_mode", text="")
-        box.prop(layer, "format", text="")
-        box.prop(layer, "mix_factor", slider=True)
-        box.prop(context.scene, "prj_export_baselayer", text="Export Base Layer")
-        if context.scene.prj_export_baselayer:
-            row = box.row(align=True)
-            row.prop(context.scene, "prj_bake_engine", expand=True)
-            box.prop(context.scene, "prj_bake_samples")
-        row = box.row(align=True)
-        row.operator("projectioncam.quick_edit", text="Quick Edit", icon="IMAGE_DATA")
-        row.operator("projectioncam.reload_image", text="", icon="FILE_REFRESH")
+        export = box.column(align=True)
+        export.prop(scene, "prj_export_baselayer", text="Export Base Image")
+        if scene.prj_export_baselayer:
+            export.row(align=True).prop(scene, "prj_bake_engine", expand=True)
+            export.prop(scene, "prj_bake_samples")
+        actions = box.row(align=True)
+        actions.operator("projectioncam.quick_edit", text="Quick Edit", icon="IMAGE_DATA")
+        actions.operator("projectioncam.reload_image", text="", icon="FILE_REFRESH")
 
 
 PANELS = (PROJECTIONCAM_UL_layers, PROJECTIONCAM_PT_main)

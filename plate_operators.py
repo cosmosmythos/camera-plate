@@ -571,7 +571,7 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
 class ProjectionCamReloadImageOperator(bpy.types.Operator):
     bl_idname = "projectioncam.reload_image"
     bl_label = "Reload"
-    bl_description = "Reload the active layer's image and fetch external edits from disk"
+    bl_description = "Fetch external edits from disk and reload the active layer"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -617,10 +617,42 @@ class ProjectionCamLayerRemoveOperator(bpy.types.Operator):
         if len(plate.layers) == 0:
             return {"CANCELLED"}
         index = min(plate.active_layer_index, len(plate.layers) - 1)
+        layer = plate.layers[index]
+        image, camera = layer.image, layer.camera
         plate.layers.remove(index)
         plate.active_layer_index = min(plate.active_layer_index, len(plate.layers) - 1)
+        # Rebuild first: dropping the row's nodes releases the image for purging.
         rebuild_tree(material)
+        _purge_layer_assets(image, camera)
         return {"FINISHED"}
+
+
+def _used_by_other_layer(image, camera) -> bool:
+    """Another surviving layer may share this layer's image or camera."""
+    for mat in bpy.data.materials:
+        plate = getattr(mat, "plate", None)
+        if plate is None:
+            continue
+        if any(layer.image is image or layer.camera is camera for layer in plate.layers):
+            return True
+    return False
+
+
+def _purge_layer_assets(image, camera) -> None:
+    """Drop the layer's private image/camera once no surviving layer uses them."""
+    if _used_by_other_layer(image, camera):
+        return
+    if camera is not None:
+        # Ours by construction; do_unlink releases any scene.camera role with it.
+        camera_data = camera.data
+        bpy.data.objects.remove(camera, do_unlink=True)
+        if camera_data is not None and camera_data.users == 0:
+            bpy.data.cameras.remove(camera_data)
+    if image is not None and image.users == 0:
+        bpy.data.images.remove(image)
+    collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
+    if collection is not None and len(collection.objects) == 0:
+        bpy.data.collections.remove(collection)
 
 
 class ProjectionCamLayerMoveOperator(bpy.types.Operator):
