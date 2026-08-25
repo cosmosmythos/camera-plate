@@ -20,6 +20,23 @@ IMAGE_FILE_FORMATS = {
 }
 
 
+def plate_colorspace_name(format_key: str) -> str:
+    """Float plates carry working-space pixels; ask a fresh image what that space is."""
+    if not format_key.startswith("EXR"):
+        return "sRGB"
+    probe = bpy.data.images.new("PRJ_ws_probe", 1, 1, float_buffer=True)
+    try:
+        return probe.colorspace_settings.name
+    finally:
+        bpy.data.images.remove(probe)
+
+
+def apply_plate_interpretation(image, format_key: str) -> None:
+    """Declare how file bytes must be read; EXR alpha is premultiplied by spec."""
+    image.colorspace_settings.name = plate_colorspace_name(format_key)
+    image.alpha_mode = "PREMUL" if format_key.startswith("EXR") else "STRAIGHT"
+
+
 def output_dir() -> str:
     """Render output directory (Blender resolves /tmp/ per-OS); app temp dir as fallback."""
     scene = bpy.context.scene
@@ -73,12 +90,14 @@ def write_buffer_file(buffer, width, height, format_key: str, base_name: str) ->
             spec = oiio.ImageSpec(width, height, 4, bit_depth)
             spec.attribute("compression", "zip")
             spec.channelnames = ("R", "G", "B", "A")
+            spec.attribute("oiio:ColorSpace", plate_colorspace_name(fmt))
         else:
             # PNG/JPEG/TIFF are top-down: flip rows.
             rgba = np.ascontiguousarray(pixels[::-1, :, :])
             channels = 3 if fmt == "JPEG" else 4  # JPEG has no alpha
             data = np.ascontiguousarray((np.clip(rgba[..., :channels], 0.0, 1.0) * 255.0).astype(np.uint8))
             spec = oiio.ImageSpec(width, height, channels, "uint8")
+            spec.attribute("oiio:ColorSpace", "sRGB")
 
         out = oiio.ImageOutput.create(path)
         if out is None or not out.open(path, spec):

@@ -1,10 +1,8 @@
 """Viewport-drag and resolution-dialog operators."""
 
 import os
-import signal
 import subprocess
 import sys
-import time
 
 import bpy
 import blf
@@ -18,7 +16,12 @@ from .plate_mapping import (
     apply_to_camera,
 )
 from .plate_layers import add_layer, rebuild_tree, material_active
-from .plate_files import IMAGE_FILE_FORMATS, ensure_image_file, image_target_path
+from .plate_files import (
+    IMAGE_FILE_FORMATS,
+    apply_plate_interpretation,
+    ensure_image_file,
+    image_target_path,
+)
 from .plate_render import bake_baselayer
 
 MIN_DRAW_SIZE = 8  # pixels; smaller rectangles are discarded
@@ -37,63 +40,17 @@ DEFAULT_MATERIAL_NAME = "_PRJ_MAT"
 HELP_MARGIN_X = 12
 HELP_MARGIN_Y = 10
 HELP_LINE_SPACING = 1.35
-EDITOR_PROBE_TIMEOUT = 10  # seconds; process tools must not block Quick Edit forever
-EDITOR_CLOSE_WAIT = 60  # seconds; grace for the editor's own save prompts during a close
 
 
-# Only this session's own Quick Edit launches are ever closed; poll() is handle-based, immune to PID reuse.
-_launched_editors: dict[int, subprocess.Popen] = {}
+# Editors this session's Quick Edit launched; poll() handles are PID-reuse-safe.
+# Used only to skip a duplicate spawn - never to close anything (Blender's own
+# image.py treats the editor as a fire-and-forget black box).
+_launched_editors: list[subprocess.Popen] = []
 
 
-def _has_our_editor_running() -> bool:
-    return any(proc.poll() is None for proc in _launched_editors.values())
-
-
-def _run_process(command) -> bool:
-    try:
-        result = subprocess.run(
-            command, capture_output=True, text=True, timeout=EDITOR_PROBE_TIMEOUT
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def _signal_editor(pid: int, sig) -> bool:
-    """Signal the whole process group; editors are launched in their own session."""
-    try:
-        os.killpg(pid, sig)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
-
-
-def _close_editor(pid: int, force: bool = False) -> bool:
-    """Ask the editor to exit; force escalates to an unconditional kill."""
-    if os.name == "nt":
-        # Without /F, taskkill posts WM_CLOSE so the editor can save first.
-        flags = ["/F", "/PID", str(pid), "/T"] if force else ["/PID", str(pid), "/T"]
-        return _run_process(["taskkill", *flags])
-    return _signal_editor(pid, signal.SIGKILL if force else signal.SIGTERM)
-
-
-def _wait_for_close(proc, seconds: float) -> bool:
-    deadline = time.time() + seconds
-    while time.time() < deadline and proc.poll() is None:
-        time.sleep(0.25)
-    return proc.poll() is not None
-
-
-def _close_our_editors() -> bool:
-    """Close every editor this session's Quick Edit launched; False when any survives."""
-    for pid, proc in list(_launched_editors.items()):
-        if proc.poll() is None:
-            if not _close_editor(pid) or not _wait_for_close(proc, EDITOR_CLOSE_WAIT):
-                _close_editor(pid, force=True)
-                if not _wait_for_close(proc, EDITOR_PROBE_TIMEOUT):
-                    return False
-        del _launched_editors[pid]
-    return True
+def _our_editor_running() -> subprocess.Popen | None:
+    _launched_editors[:] = [proc for proc in _launched_editors if proc.poll() is None]
+    return _launched_editors[0] if _launched_editors else None
 
 
 def _editor_command(editor_path: str) -> list[str]:
@@ -389,7 +346,7 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
     image_format: bpy.props.EnumProperty(
         name="Format",
         description="File format for the generated image and Quick Edit exports",
-        default="EXR_32",
+        default="EXR_16",
         items=[
             ("PNG", "PNG", ""),
             ("JPEG", "JPEG", ""),
@@ -478,7 +435,7 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
         if float_buffer:
             image.use_half_precision = self.image_format == "EXR_16"
         image.file_format = IMAGE_FILE_FORMATS[self.image_format]
-        image.colorspace_settings.name = "Non-Color" if exr else "sRGB"
+        apply_plate_interpretation(image, self.image_format)
         fill_alpha = 0.0 if alpha or exr else 1.0
         image.generated_type = "BLANK"
         image.generated_color = (0.0, 0.0, 0.0, fill_alpha)
@@ -554,22 +511,7 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
     bl_description = "Open the active layer's image in an external editor"
     bl_options = {"REGISTER"}
 
-    def invoke(self, context, event):
-        editor = context.preferences.filepaths.image_editor
-        if editor and _has_our_editor_running():
-            self._relaunch_requested = True
-            return context.window_manager.invoke_props_dialog(self, width=280)
-        return self.execute(context)
-
-    def draw(self, context):
-        editor = context.preferences.filepaths.image_editor
-        self.layout.label(
-            text=f"Quick Edit will close {os.path.basename(editor)} and relaunch it with the plate files.",
-            icon="ERROR",
-        )
-
     def execute(self, context):
-        self._relaunch_requested = getattr(self, "_relaunch_requested", False)
         material = material_active(context)
         if material is None:
             self.report({"ERROR"}, "Select an object with a material.")
@@ -592,20 +534,6 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
-        if _has_our_editor_running():
-            if not self._relaunch_requested:
-                self.report(
-                    {"ERROR"},
-                    "The editor from a previous Quick Edit is still running; close it before Quick Edit.",
-                )
-                return {"CANCELLED"}
-            if not _close_our_editors():
-                self.report(
-                    {"ERROR"},
-                    "The previous editor instance is still running; close it manually and try again.",
-                )
-                return {"CANCELLED"}
-
         baselayer_path = None
         if context.scene.prj_export_baselayer:
             baselayer_path = bake_baselayer(context, layer)
@@ -618,16 +546,24 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
             self.report({"ERROR"}, f"Could not write the image to disk: {exc}")
             return {"CANCELLED"}
 
+        if _our_editor_running() is not None:
+            # Overwriting the files is safe while they are open; a duplicate
+            # window is what we avoid, so hand off only when nothing runs.
+            self.report(
+                {"INFO"},
+                f"Plate files are current; {os.path.basename(editor)} is still open from the last hand-off.",
+            )
+            return {"FINISHED"}
+
         command = _editor_command(editor) + [path]
         if baselayer_path is not None:
             command.append(baselayer_path)
         try:
-            proc = subprocess.Popen(command, start_new_session=(os.name != "nt"))
+            proc = subprocess.Popen(command)
         except Exception as exc:
             self.report({"ERROR"}, f"Failed to launch editor: {exc}")
             return {"CANCELLED"}
-        # The new session lets killpg() reach the whole tree; Windows taskkill /T covers the same ground.
-        _launched_editors[proc.pid] = proc
+        _launched_editors.append(proc)
         return {"FINISHED"}
 
 
@@ -656,6 +592,7 @@ class ProjectionCamReloadImageOperator(bpy.types.Operator):
             self.report({"ERROR"}, "The image has no file on disk to reload.")
             return {"CANCELLED"}
         layer.image.reload()
+        apply_plate_interpretation(layer.image, layer.format)
         for window in context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type in {"VIEW_3D", "IMAGE_EDITOR"}:
