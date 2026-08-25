@@ -18,6 +18,7 @@ from .plate_mapping import (
 from .plate_layers import add_layer, rebuild_tree, material_active
 from .plate_files import (
     IMAGE_FILE_FORMATS,
+    ensure_file_source,
     apply_plate_interpretation,
     ensure_image_file,
     image_target_path,
@@ -587,6 +588,7 @@ class ProjectionCamReloadImageOperator(bpy.types.Operator):
         if layer.image is None:
             self.report({"ERROR"}, "The active layer has no image.")
             return {"CANCELLED"}
+        ensure_file_source(layer.image, layer.format)
         absolute = bpy.path.abspath(layer.image.filepath)
         if not layer.image.filepath or not os.path.exists(absolute):
             self.report({"ERROR"}, "The image has no file on disk to reload.")

@@ -112,12 +112,25 @@ def write_buffer_file(buffer, width, height, format_key: str, base_name: str) ->
     return path
 
 
+def ensure_file_source(image, format_key: str) -> bool:
+    """A generated plate that gained a disk twin must read from it, not stay blank."""
+    if image.source != "GENERATED":
+        return False
+    absolute = bpy.path.abspath(image.filepath) if image.filepath else ""
+    if not absolute or not os.path.exists(absolute):
+        return False
+    image.source = "FILE"
+    image.file_format = IMAGE_FILE_FORMATS.get(format_key, "PNG")
+    return True
+
+
 def write_image_file(image, format_key: str, force: bool = False) -> str:
     """Write the image's pixels; an existing on-disk file is kept unless force. Raises on failure."""
     raw = image.filepath
     if not force and raw:
         absolute = bpy.path.abspath(raw)
         if os.path.exists(absolute):
+            ensure_file_source(image, format_key)
             return absolute
 
     import numpy as np
