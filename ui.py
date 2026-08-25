@@ -69,10 +69,14 @@ class PROJECTIONCAM_PT_main(bpy.types.Panel):
         layer = plate.layers[plate.active_layer_index]
         box = layout.box()
         box.label(text="Active Layer", icon="TEXTURE")
-        box.prop(layer, "blend_mode")
-        box.prop(layer, "format")
+        box.prop(layer, "blend_mode", text="")
+        box.prop(layer, "format", text="")
         box.prop(layer, "mix_factor", slider=True)
         box.prop(context.scene, "prj_export_baselayer", text="Export Base Layer")
+        if context.scene.prj_export_baselayer:
+            row = box.row(align=True)
+            row.prop(context.scene, "prj_bake_engine", expand=True)
+            box.prop(context.scene, "prj_bake_samples")
         row = box.row(align=True)
         row.operator("projectioncam.quick_edit", text="Quick Edit", icon="IMAGE_DATA")
         row.operator("projectioncam.reload_image", text="", icon="FILE_REFRESH")

@@ -19,9 +19,6 @@ BLEND_MODES = [
     ("DARKEN", "Darken", ""),
 ]
 
-# Node placement mirrors the hand-arranged reference tree in "_PRJ_MAT":
-# TexCoord -> Group -> Image -> gated Mix per row, collapsed Math row above,
-# then a Mix chain feeding PRJ_OUT.
 ROW_SPACING = 260.0
 ROW_ORIGIN_Y = 120.0
 TEXCOORD_X = -1500.0
@@ -33,6 +30,8 @@ STACK_MIX_X = -600.0
 MATH_Y_OFFSET = 40.0
 PRJ_OUT_X = -320.0
 PRJ_OUT_Y = 60.0
+PRJ_BASE_X = -900.0
+PRJ_BASE_Y = 300.0
 BSDF_X = -200.0
 SHADER_Y = 100.0
 OUTPUT_X = 200.0
@@ -197,11 +196,6 @@ def _set_projection_values(group_node, camera, image) -> None:
     ]
     if size[0] > 0 and size[1] > 0:
         pushes += [("X", size[0], False), ("Y", size[1], False)]
-    elif image is not None:
-        print(
-            f"[PRJ] image '{image.name}' has no pixel data; "
-            "resolution left at the node group defaults."
-        )
     for socket_name, value, is_float in pushes:
         input_socket = _group_input(group_node, socket_name, is_float)
         if input_socket is not None:
@@ -261,7 +255,7 @@ def _first_connect(tree, reroute, material) -> None:
 
 
 def _build_layer_row(
-    tree, layer, y, gate_alpha: bool = False
+    tree, layer, y, gate_alpha: bool = False, base_socket=None
 ) -> tuple[bpy.types.Node, bpy.types.NodeSocket, bpy.types.NodeSocket]:
     """TexCoord -> Projector -> Image row; gate through the group's facing Mask, if present."""
     tex_node = tree.nodes.new("ShaderNodeTexCoord")
@@ -283,6 +277,7 @@ def _build_layer_row(
     image_node.location = (IMAGE_X, y)
     image_node.select = False
     image_node.image = layer.image
+    image_node.extension = "CLIP"
     _prj_tag(image_node)
 
     if group_node.node_tree is None:
@@ -306,76 +301,97 @@ def _build_layer_row(
     if mask_out is None or layer.camera is None:
         return image_node, image_node.outputs["Color"], image_node.outputs["Alpha"]
 
+    # Plate alpha rides along with the facing mask, else unpainted pixels paint black.
+    gated_alpha = tree.nodes.new("ShaderNodeMath")
+    gated_alpha.operation = "MULTIPLY"
+    gated_alpha.location = (ALPHA_MATH_X, y + MATH_Y_OFFSET)
+    gated_alpha.hide = True
+    gated_alpha.select = False
+    _prj_tag(gated_alpha)
+    tree.links.new(mask_out, gated_alpha.inputs[0])
+    tree.links.new(image_node.outputs["Alpha"], gated_alpha.inputs[1])
+
     gated_color = tree.nodes.new("ShaderNodeMix")
     gated_color.location = (MIX_X, y)
     gated_color.data_type = "RGBA"
     _prj_tag(gated_color)
-    _socket(gated_color.inputs, "A_Color").default_value = (0.0, 0.0, 0.0, 0.0)
-    _socket(gated_color.inputs, "Factor_Float").default_value = 1.0
+    # The bottom row blends the plate over PRJ_BASE; upper rows gate over black
+    # (alpha reaches their stack factor instead, avoiding double-gating).
+    color_a = _socket(gated_color.inputs, "A_Color")
+    if base_socket is not None:
+        tree.links.new(base_socket, color_a)
+        tree.links.new(gated_alpha.outputs[0], _socket(gated_color.inputs, "Factor_Float"))
+    else:
+        color_a.default_value = (0.0, 0.0, 0.0, 0.0)
+        tree.links.new(mask_out, _socket(gated_color.inputs, "Factor_Float"))
     gated_color.select = False
-    tree.links.new(mask_out, _socket(gated_color.inputs, "Factor_Float"))
     tree.links.new(image_node.outputs["Color"], _socket(gated_color.inputs, "B_Color"))
 
-    if gate_alpha:
-        gated_alpha = tree.nodes.new("ShaderNodeMath")
-        gated_alpha.operation = "MULTIPLY"
-        gated_alpha.location = (ALPHA_MATH_X, y + MATH_Y_OFFSET)
-        gated_alpha.hide = True
-        gated_alpha.select = False
-        _prj_tag(gated_alpha)
-        tree.links.new(mask_out, gated_alpha.inputs[0])
-        tree.links.new(image_node.outputs["Alpha"], gated_alpha.inputs[1])
-        alpha_out = gated_alpha.outputs[0]
-    else:
-        alpha_out = image_node.outputs["Alpha"]
-
-    return image_node, _socket(gated_color.outputs, "Result_Color"), alpha_out
+    return (
+        image_node,
+        _socket(gated_color.outputs, "Result_Color"),
+        gated_alpha.outputs[0] if gate_alpha else image_node.outputs["Alpha"],
+    )
 
 
 def rebuild_tree(material) -> None:
-    """Rebuild the addon-owned chain only; PRJ_OUT's outgoing wiring is user territory."""
+    """Rebuild the addon-owned chain only; PRJ_OUT/PRJ_BASE outgoing wiring is user territory."""
     material.use_nodes = True
     tree = material.node_tree
     _remove_prj_nodes(tree)
 
     layers = list(material.plate.layers)
-    if not layers:
-        return
 
-    # Descending list order -> stacking order. Index 0 (topmost) is blended
-    # last; the last list item is the base color underneath.
-    rows = []
-    for index, layer in enumerate(layers):
-        y = ROW_ORIGIN_Y - ROW_SPACING * index
-        is_base = index == len(layers) - 1
-        rows.append((layer, _build_layer_row(tree, layer, y, not is_base)))
-    rows.reverse()
+    base_reroute = next((n for n in tree.nodes if n.get("PRJ_base")), None)
+    if base_reroute is None:
+        base_reroute = tree.nodes.new("NodeReroute")
+        base_reroute.name = "PRJ_BASE"
+        base_reroute.location = (PRJ_BASE_X, PRJ_BASE_Y)
+        base_reroute["PRJ_base"] = True
+    if not base_reroute.label:
+        base_reroute.label = base_reroute.name
 
-    # Composite bottom-up: the running color starts as the base plate, then
-    # each plate above it blends itself over the running result.
-    color = rows[0][1][1]
-    for index, (layer, (_, layer_color, layer_alpha)) in enumerate(rows[1:], 1):
-        stack_index = len(layers) - 1 - index
-        row_y = ROW_ORIGIN_Y - ROW_SPACING * stack_index
-        factor = tree.nodes.new("ShaderNodeMath")
-        factor.location = (MIX_X, row_y + MATH_Y_OFFSET)
-        factor.operation = "MULTIPLY"
-        factor.use_clamp = True
-        factor.hide = True
-        _prj_tag(factor)
-        # Disabled layers fully expose the stack below (factor 0).
-        factor.inputs[1].default_value = layer.mix_factor if layer.enabled else 0.0
-        tree.links.new(layer_alpha, factor.inputs[0])
+    if layers:
+        # Descending list order -> stacking order. Index 0 (topmost) is blended
+        # last; the last list item is the base color underneath.
+        rows = []
+        for index, layer in enumerate(layers):
+            y = ROW_ORIGIN_Y - ROW_SPACING * index
+            is_base = index == len(layers) - 1
+            base_socket = base_reroute.outputs[0] if is_base else None
+            rows.append(
+                (layer, _build_layer_row(tree, layer, y, not is_base, base_socket))
+            )
+        rows.reverse()
 
-        mix = tree.nodes.new("ShaderNodeMix")
-        mix.location = (STACK_MIX_X, row_y)
-        mix.data_type = "RGBA"
-        mix.blend_type = layer.blend_mode
-        _prj_tag(mix)
-        tree.links.new(factor.outputs[0], _socket(mix.inputs, "Factor_Float"))
-        tree.links.new(color, _socket(mix.inputs, "A_Color"))
-        tree.links.new(layer_color, _socket(mix.inputs, "B_Color"))
-        color = _socket(mix.outputs, "Result_Color")
+        # Composite bottom-up: the running color starts as the base plate, then
+        # each plate above it blends itself over the running result.
+        color = rows[0][1][1]
+        for index, (layer, (_, layer_color, layer_alpha)) in enumerate(rows[1:], 1):
+            stack_index = len(layers) - 1 - index
+            row_y = ROW_ORIGIN_Y - ROW_SPACING * stack_index
+            factor = tree.nodes.new("ShaderNodeMath")
+            factor.location = (MIX_X, row_y + MATH_Y_OFFSET)
+            factor.operation = "MULTIPLY"
+            factor.use_clamp = True
+            factor.hide = True
+            _prj_tag(factor)
+            # Disabled layers fully expose the stack below (factor 0).
+            factor.inputs[1].default_value = layer.mix_factor if layer.enabled else 0.0
+            tree.links.new(layer_alpha, factor.inputs[0])
+
+            mix = tree.nodes.new("ShaderNodeMix")
+            mix.location = (STACK_MIX_X, row_y)
+            mix.data_type = "RGBA"
+            mix.blend_type = layer.blend_mode
+            _prj_tag(mix)
+            tree.links.new(factor.outputs[0], _socket(mix.inputs, "Factor_Float"))
+            tree.links.new(color, _socket(mix.inputs, "A_Color"))
+            tree.links.new(layer_color, _socket(mix.inputs, "B_Color"))
+            color = _socket(mix.outputs, "Result_Color")
+        output_source = color
+    else:
+        output_source = base_reroute.outputs[0]
 
     reroute = next((n for n in tree.nodes if n.get("PRJ_out")), None)
     if reroute is None:
@@ -384,12 +400,14 @@ def rebuild_tree(material) -> None:
         reroute.location = (PRJ_OUT_X, PRJ_OUT_Y)
         reroute["PRJ_out"] = True
         _first_connect(tree, reroute, material)
+    if not reroute.label:
+        reroute.label = reroute.name
 
     # Only the final stack output may feed PRJ_OUT; nothing else is allowed.
     for link in list(tree.links):
         if link.to_node is reroute:
             tree.links.remove(link)
-    tree.links.new(color, reroute.inputs[0])
+    tree.links.new(output_source, reroute.inputs[0])
 
     # Newly added nodes are selected by default; start a fresh tree unselected.
     tree.nodes.active = None
@@ -439,6 +457,22 @@ def register() -> None:
         description="Bake a rendered frame from the active layer's camera when Quick Edit runs",
         default=True,
     )
+    bpy.types.Scene.prj_bake_engine = bpy.props.EnumProperty(
+        name="Bake Engine",
+        description="Render engine",
+        items=[
+            ("EEVEE", "EEVEE", ""),
+            ("CYCLES", "CYCLES", ""),
+        ],
+        default="EEVEE",
+    )
+    bpy.types.Scene.prj_bake_samples = bpy.props.IntProperty(
+        name="Samples",
+        description="Render samples",
+        default=4,
+        min=1,
+        max=1024,
+    )
     bpy.types.Scene.prj_cameras_hidden = bpy.props.BoolProperty(
         name="Projection Cameras Hidden",
         default=False,
@@ -465,6 +499,8 @@ def unregister() -> None:
 
     del bpy.types.Material.plate
     del bpy.types.Scene.prj_export_baselayer
+    del bpy.types.Scene.prj_bake_engine
+    del bpy.types.Scene.prj_bake_samples
     del bpy.types.Scene.prj_cameras_hidden
     for cls in reversed(PROPERTY_GROUPS):
         bpy.utils.unregister_class(cls)

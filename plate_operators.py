@@ -327,25 +327,38 @@ def _is_plate_camera(camera_object) -> bool:
     return collection is not None and camera_object.name in collection.all_objects
 
 
-def _plate_cameras() -> list[bpy.types.Object]:
-    collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
-    if collection is None:
-        return []
-    return [obj for obj in collection.all_objects if obj.type == "CAMERA"]
-
-
 class ProjectionCamToggleCameraVisibilityOperator(bpy.types.Operator):
     bl_idname = "projectioncam.toggle_camera_visibility"
     bl_label = "Toggle Camera Visibility"
-    bl_description = "Hide or show all projection cameras in the viewport"
+    bl_description = "Hide or show the projection camera collection in the viewport"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
         hidden = not context.scene.prj_cameras_hidden
-        for camera in _plate_cameras():
-            camera.hide_viewport = hidden
+        collection = bpy.data.collections.get(PLATE_COLLECTION_NAME)
+        if collection is not None:
+            collection.hide_viewport = hidden
         context.scene.prj_cameras_hidden = hidden
         return {"FINISHED"}
+
+
+def _extension_default_material(context) -> bpy.types.Material | None:
+    """Tracked default for the EXISTING picker; creation order keeps it deterministic."""
+    tagged = [m for m in bpy.data.materials if m.get("PRJ_default")]
+    active = context.object.active_material if context.object is not None else None
+    if active is not None:
+        if active in tagged:
+            return active
+        plate = getattr(active, "plate", None)
+        if plate is not None and len(plate.layers) > 0:
+            return active
+    if tagged:
+        return tagged[0]
+    for material in bpy.data.materials:
+        plate = getattr(material, "plate", None)
+        if plate is not None and len(plate.layers) > 0:
+            return material
+    return None
 
 
 class ProjectionCamDialogOperator(bpy.types.Operator):
@@ -410,6 +423,10 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
             self.image_name = f"{PLATE_OBJECT_PREFIX}_{self.plate_width}x{self.plate_height}"
         if not self.material_name:
             self.material_name = DEFAULT_MATERIAL_NAME
+        if self.material_mode == "EXISTING" and not self.material_choice:
+            default_material = _extension_default_material(context)
+            if default_material is not None:
+                self.material_choice = default_material.name
         return context.window_manager.invoke_props_dialog(self, width=220)
 
     def draw(self, context):
@@ -492,7 +509,9 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
         return material
 
     def _new_material(self, name):
-        return bpy.data.materials.new(name)
+        material = bpy.data.materials.new(name)
+        material["PRJ_default"] = True
+        return material
 
     def cancel(self, context):
         global _pending_plate_camera
@@ -532,21 +551,22 @@ class ProjectionCamDialogOperator(bpy.types.Operator):
 class ProjectionCamQuickEditOperator(bpy.types.Operator):
     bl_idname = "projectioncam.quick_edit"
     bl_label = "Quick Edit"
-    bl_description = "Open the active layer's image in the external editor set in Blender preferences"
+    bl_description = "Open the active layer's image in an external editor"
     bl_options = {"REGISTER"}
 
     def invoke(self, context, event):
         editor = context.preferences.filepaths.image_editor
         if editor and _has_our_editor_running():
             self._relaunch_requested = True
-            return context.window_manager.invoke_props_dialog(self, width=460)
+            return context.window_manager.invoke_props_dialog(self, width=280)
         return self.execute(context)
 
     def draw(self, context):
         editor = context.preferences.filepaths.image_editor
-        self.layout.label(text=f"{os.path.basename(editor)} is still running from a previous Quick Edit.")
-        self.layout.label(text="Quick Edit will close it and relaunch it with the plate files.")
-        self.layout.label(text="Unsaved changes in the editor will be lost.", icon="ERROR")
+        self.layout.label(
+            text=f"Quick Edit will close {os.path.basename(editor)} and relaunch it with the plate files.",
+            icon="ERROR",
+        )
 
     def execute(self, context):
         self._relaunch_requested = getattr(self, "_relaunch_requested", False)
@@ -614,7 +634,7 @@ class ProjectionCamQuickEditOperator(bpy.types.Operator):
 class ProjectionCamReloadImageOperator(bpy.types.Operator):
     bl_idname = "projectioncam.reload_image"
     bl_label = "Reload"
-    bl_description = "Reload the active layer's image from disk, picking up external edits"
+    bl_description = "Reload the active layer's image and fetch external edits from disk"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
